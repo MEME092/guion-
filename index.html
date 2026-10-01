@@ -1,486 +1,611 @@
-<html lang="es">
-import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Copy, RefreshCw, Zap, Check, Play, Clock, LayoutTemplate, PenTool, Users, FileText, ChevronRight } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, collection, onSnapshot, addDoc, serverTimestamp, query } from 'firebase/firestore';
-
-declare const __firebase_config: string | undefined;
-declare const __app_id: string | undefined;
-declare const __initial_auth_token: string | undefined;
-
-declare module 'react/jsx-runtime' {
-  export const Fragment: any;
-  export function jsx(type: any, props: any, key?: any): any;
-  export function jsxs(type: any, props: any, key?: any): any;
-}
-
-declare namespace JSX {
-  interface IntrinsicElements {
-    [elemName: string]: any;
-  }
-}
-
-// Initialize Firebase OUTSIDE component
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'scriptflow-ai';
-
-// --- Constants ---
-const PLATFORMS = ['TikTok', 'Instagram Reels', 'YouTube Shorts', 'YouTube'];
-const DURATIONS = ['15 segundos', '30 segundos', '45 segundos', '60 segundos', '90 segundos', '2 minutos', '3 minutos', '5 minutos', '10 minutos'];
-const STYLES = ['Viral', 'Storytelling', 'Educativo', 'Misterioso', 'Emocional', 'Divertido', 'Profesional', 'Polémico', 'Motivacional', 'Documental'];
-const LOADING_PHRASES = [
-  'Analizando tu idea...',
-  'Construyendo el gancho...',
-  'Creando una estructura de alta retención...',
-  'Escribiendo el guion...',
-  'Optimizando el ritmo...'
-];
-
-const callGeminiAPI = async (prompt, systemInstruction) => {
-  const apiKey = ""; // Canvas handles API key natively
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-  
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] },
-    generationConfig: {
-      temperature: 0.9, // Higher temp for more creativity and less repetition
-    }
-  };
-
-  try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const result = await response.json();
-    
-    if (result.candidates && result.candidates.length > 0) {
-      return result.candidates[0].content.parts[0].text;
-    }
-    throw new Error("No response from AI");
-  } catch (error) {
-    console.error("Gemini API Error:", error);
-    throw error;
-  }
-};
-
-export default function ScriptFlowAI() {
-  const [user, setUser] = useState(null);
-  const [scriptHistory, setScriptHistory] = useState([]);
-  
-  // Form State
-  const [topic, setTopic] = useState('');
-  const [platform, setPlatform] = useState(PLATFORMS[0]);
-  const [duration, setDuration] = useState(DURATIONS[1]);
-  const [style, setStyle] = useState(STYLES[0]);
-  const [audience, setAudience] = useState('');
-  
-  // App State
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [loadingPhraseIndex, setLoadingPhraseIndex] = useState(0);
-  const [currentScript, setCurrentScript] = useState('');
-  const [copied, setCopied] = useState(false);
-  const [error, setError] = useState('');
-
-  // Refs for auto-scrolling
-  const resultRef = useRef(null);
-
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScriptFlow AI - Generador de Guiones Originales</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            900: '#111827',
+                            950: '#030712',
+                        }
+                    },
+                    animation: {
+                        'spin-slow': 'spin 3s linear infinite',
+                        'pulse-fast': 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
         }
-      } catch (err) {
-        console.error("Auth error:", err);
-      }
-    };
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    // RULE 1: Strict paths. RULE 2: No complex queries. Fetch all and filter in memory if needed.
-    const scriptsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'scripts');
-    const q = query(scriptsRef);
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const history = [];
-      snapshot.forEach((doc) => {
-        history.push({ id: doc.id, ...doc.data() });
-      });
-      // Sort in memory (newest first based on createdAt or fallback to array index if missing)
-      history.sort((a, b) => {
-        const timeA = a.createdAt?.toMillis() || 0;
-        const timeB = b.createdAt?.toMillis() || 0;
-        return timeB - timeA;
-      });
-      setScriptHistory(history);
-    }, (err) => {
-      console.error("Firestore error:", err);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  useEffect(() => {
-    let interval;
-    if (isGenerating) {
-      interval = setInterval(() => {
-        setLoadingPhraseIndex((prev) => (prev + 1) % LOADING_PHRASES.length);
-      }, 2500); // Change phrase every 2.5 seconds
-    } else {
-      setLoadingPhraseIndex(0);
-    }
-    return () => clearInterval(interval);
-  }, [isGenerating]);
-
-  const generateScript = async (mode = 'new') => {
-    if (!topic.trim()) {
-      setError("Por favor, ingresa un tema para el video.");
-      return;
-    }
-    
-    setError('');
-    setIsGenerating(true);
-    setCurrentScript('');
-
-    try {
-      const systemInstruction = `Eres ScriptFlow AI, un guionista profesional experto en retención para redes sociales. 
-TU ÚNICA FUNCIÓN ES GENERAR GUIONES EXCEPCIONALES.
-Reglas estrictas:
-1. RETENCIÓN EXTREMA: El guion debe atrapar al espectador en el segundo 0. NO uses introducciones aburridas ("Hola chicos...", "Bienvenidos a..."). Ve directo a la curiosidad.
-2. ESTRUCTURA DINÁMICA: Usa estructuras narrativas variadas (Problema/Solución, Historia Personal, Dato Sorprendente, Suspenso).
-3. MICRO-GANCHOS: Inserta frases que mantengan la atención (ej. "Pero aquí viene lo peor...", "Y esto es lo que nadie te dice...").
-4. DURACIÓN ESTRICTA: Adapta el guion para que se lea cómodamente en exactamente ${duration}.
-5. NATURALIDAD: Lenguaje natural, conversacional, fácil de hablar. Cero robótico.
-6. FORMATO OBLIGATORIO: Utiliza el siguiente formato exacto con marcas de tiempo aproximadas:
-🎬 GUION
-
-GANCHO — 0:00
-"..."
-
-DESARROLLO — 0:05
-"..."
-
-[Secciones adicionales según duración]
-
-CIERRE — [tiempo]
-"..."
-
-CTA — [tiempo]
-"..."`;
-
-      let prompt = `Crea un guion para ${platform} con una duración de ${duration}.\nTema: ${topic}\nEstilo: ${style}\n`;
-      if (audience) prompt += `Público objetivo: ${audience}\n`;
-
-      // Anti-repetition logic
-      if (mode === 'new' || mode === 'regenerate') {
-        // Find recent scripts with similar topics in history
-        const relatedHistory = scriptHistory
-          .filter(s => s.topic.toLowerCase().includes(topic.toLowerCase().substring(0, 10)))
-          .slice(0, 3); // Take last 3 to avoid prompt bloating
-
-        if (relatedHistory.length > 0) {
-          prompt += `\nREGLA CRÍTICA - SISTEMA ANTI-REPETICIÓN: Ya he generado guiones sobre esto antes. DEBES usar un gancho, estructura narrativa, ejemplos y cierre COMPLETAMENTE DIFERENTES a los siguientes guiones generados previamente:\n`;
-          relatedHistory.forEach((h, i) => {
-            prompt += `--- Guion Anterior ${i+1} ---\n${h.content.substring(0, 300)}...\n`;
-          });
-          prompt += `\nINSTRUCCIÓN: Sorpréndeme con un enfoque narrativo totalmente nuevo e inesperado.`;
-        }
-      }
-
-      if (mode === 'regenerate') {
-        prompt += `\n\nESTA ES UNA REGENERACIÓN: Descarta la idea que acabas de tener. Escribe algo radicalmente distinto al guion anterior. Cambia el ángulo, el tono dentro del estilo, y la estructura (ej. si el anterior fue un consejo directo, haz que este sea una historia intrigante).`;
-      } else if (mode === 'improve') {
-        prompt = `Revisa el siguiente guion que he generado y MEJORA SU RETENCIÓN drásticamente.\n\nReglas para mejorar:\n1. Haz el gancho inicial un 10x más fuerte e intrigante.\n2. Elimina cualquier palabra innecesaria que ralentice el ritmo.\n3. Añade al menos 2 micro-ganchos (frases que generen curiosidad) en las transiciones.\n4. MANTÉN la información central y el tema, solo mejora la forma en que se cuenta para que sea imposible dejar de ver el video.\n5. Respeta el formato original (GANCHO, DESARROLLO, CTA, etc.) y la duración de ${duration}.\n\nGuion actual a mejorar:\n\n${currentScript}`;
-      }
-
-      const generatedContent = await callGeminiAPI(prompt, systemInstruction);
-      setCurrentScript(generatedContent);
-
-      // Save to history (only for new or regenerated, not slight improvements)
-      if (user && (mode === 'new' || mode === 'regenerate')) {
-        const scriptsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'scripts');
-        await addDoc(scriptsRef, {
-          topic,
-          platform,
-          duration,
-          style,
-          content: generatedContent,
-          createdAt: serverTimestamp()
-        });
-      }
-
-      // Scroll to results
-      setTimeout(() => {
-        resultRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 100);
-
-    } catch (err) {
-      setError("Hubo un error al generar el guion. Intenta de nuevo.");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(currentScript);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-indigo-500 selection:text-white">
-      {/* Header */}
-      <header className="border-b border-slate-800/60 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-              <Sparkles className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">
-                ScriptFlow AI
-              </h1>
-            </div>
-          </div>
-          <div className="text-xs text-slate-500 font-medium tracking-wide uppercase flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)] animate-pulse"></div>
-            Generador Activo
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 pb-24">
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         
-        {/* Hero Section */}
-        <div className="text-center max-w-3xl mx-auto mb-12 mt-6">
-          <h2 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-white mb-4 leading-tight">
-            Convierte cualquier idea en un guion <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">que la gente quiera terminar.</span>
-          </h2>
-          <p className="text-lg text-slate-400">
-            Diseñado para retención máxima. Cero robótico, 100% magnético.
-          </p>
-        </div>
-
-        {/* Input Form Card */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500"></div>
-          
-          <div className="space-y-6">
-            {/* Topic Input */}
-            <div>
-              <label className="flex items-center gap-2 text-sm font-semibold text-slate-300 mb-2">
-                <PenTool className="w-4 h-4 text-indigo-400" />
-                ¿Sobre qué quieres hacer el video?
-              </label>
-              <textarea
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                placeholder="Ej: Quiero hacer un video explicando por qué algunas motos consumen demasiado combustible..."
-                className="w-full h-32 bg-slate-950/50 border border-slate-700 rounded-xl p-4 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all resize-none text-lg"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Platform Select */}
-              <div>
-                <label className="flex items-center gap-2 text-sm font-semibold text-slate-300 mb-2">
-                  <Play className="w-4 h-4 text-indigo-400" />
-                  Plataforma
-                </label>
-                <select
-                  value={platform}
-                  onChange={(e) => setPlatform(e.target.value)}
-                  className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-3.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
-                >
-                  {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </div>
-
-              {/* Duration Select */}
-              <div>
-                <label className="flex items-center gap-2 text-sm font-semibold text-slate-300 mb-2">
-                  <Clock className="w-4 h-4 text-indigo-400" />
-                  Duración
-                </label>
-                <select
-                  value={duration}
-                  onChange={(e) => setDuration(e.target.value)}
-                  className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-3.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
-                >
-                  {DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}
-                </select>
-              </div>
-
-              {/* Style Select */}
-              <div>
-                <label className="flex items-center gap-2 text-sm font-semibold text-slate-300 mb-2">
-                  <LayoutTemplate className="w-4 h-4 text-indigo-400" />
-                  Estilo Narrativo
-                </label>
-                <select
-                  value={style}
-                  onChange={(e) => setStyle(e.target.value)}
-                  className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-3.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
-                >
-                  {STYLES.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-
-              {/* Audience Input */}
-              <div>
-                <label className="flex items-center gap-2 text-sm font-semibold text-slate-300 mb-2">
-                  <Users className="w-4 h-4 text-indigo-400" />
-                  Público (Opcional)
-                </label>
-                <input
-                  type="text"
-                  value={audience}
-                  onChange={(e) => setAudience(e.target.value)}
-                  placeholder="Ej: Principiantes, Expertos, Jóvenes..."
-                  className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-3.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                />
-              </div>
-            </div>
-
-            {error && (
-              <div className="text-red-400 text-sm font-medium bg-red-400/10 border border-red-400/20 rounded-lg p-3">
-                {error}
-              </div>
-            )}
-
-            {/* Submit Button */}
-            <button
-              onClick={() => generateScript('new')}
-              disabled={isGenerating}
-              className={`w-full py-4 rounded-xl font-bold text-lg text-white flex items-center justify-center gap-3 transition-all duration-300 relative overflow-hidden group ${
-                isGenerating 
-                  ? 'bg-slate-800 text-slate-400 cursor-not-allowed' 
-                  : 'bg-indigo-600 hover:bg-indigo-500 shadow-[0_0_20px_rgba(79,70,229,0.3)] hover:shadow-[0_0_30px_rgba(79,70,229,0.5)]'
-              }`}
-            >
-              {isGenerating ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                  <span className="animate-pulse">{LOADING_PHRASES[loadingPhraseIndex]}</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-5 h-5" />
-                  GENERAR GUION
-                  <div className="absolute inset-0 h-full w-full bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-in-out opacity-0 group-hover:opacity-20 pointer-events-none"></div>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Result Area */}
-        {currentScript && !isGenerating && (
-          <div ref={resultRef} className="mt-12 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            <div className="flex items-center justify-between mb-4 px-2">
-              <h3 className="text-2xl font-bold text-white flex items-center gap-2">
-                <FileText className="w-6 h-6 text-indigo-400" />
-                Tu Guion
-              </h3>
-              <div className="text-sm font-medium text-slate-400 bg-slate-800 px-3 py-1 rounded-full">
-                {platform} • {duration}
-              </div>
-            </div>
-
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-xl overflow-hidden flex flex-col">
-              
-              {/* Script Content */}
-              <div className="p-6 sm:p-10 font-medium text-lg leading-relaxed whitespace-pre-wrap text-slate-300 relative">
-                {/* Decorative quotes */}
-                <div className="absolute top-6 left-6 text-6xl text-slate-800/50 font-serif leading-none pointer-events-none">"</div>
-                
-                <div className="relative z-10 font-mono tracking-tight script-content">
-                  {currentScript.split('\n').map((line, index) => {
-                    if (line.includes('🎬 GUION')) {
-                      return <div key={index} className="text-indigo-400 font-black text-xl mb-6 pb-4 border-b border-slate-800 flex items-center gap-2"><Sparkles className="w-5 h-5"/> {line}</div>;
-                    }
-                    if (line.match(/^[A-ZÁÉÍÓÚÑ]+( — | - |: )/)) {
-                      // Format section headers
-                      const [title, ...rest] = line.split(/( — | - |: )/);
-                      return (
-                        <div key={index} className="mt-8 mb-2 flex items-center gap-2">
-                          <span className="text-xs bg-indigo-500/20 text-indigo-300 px-2 py-1 rounded font-bold uppercase tracking-wider border border-indigo-500/30">
-                            {title}
-                          </span>
-                          <span className="text-slate-500 text-sm font-semibold">{rest.join('')}</span>
-                        </div>
-                      );
-                    }
-                    if (line.trim().startsWith('"') && line.trim().endsWith('"')) {
-                      // Format spoken lines
-                      return <p key={index} className="pl-4 border-l-2 border-indigo-500/30 text-white my-2">{line}</p>;
-                    }
-                    if (line.trim().length > 0) {
-                      return <p key={index} className="my-2">{line}</p>;
-                    }
-                    return null;
-                  })}
-                </div>
-              </div>
-
-              {/* Action Buttons Toolbar */}
-              <div className="bg-slate-950 p-4 sm:p-6 border-t border-slate-800 flex flex-wrap gap-4 items-center justify-between">
-                <button
-                  onClick={handleCopy}
-                  className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium transition-colors border border-slate-700 hover:border-slate-600"
-                >
-                  {copied ? <Check className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
-                  {copied ? 'Copiado!' : 'Copiar guion'}
-                </button>
-                
-                <div className="flex flex-1 sm:flex-none gap-4">
-                  <button
-                    onClick={() => generateScript('regenerate')}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium transition-colors border border-slate-700 hover:border-slate-600 group"
-                    title="Generar un guion completamente nuevo"
-                  >
-                    <RefreshCw className="w-5 h-5 group-hover:rotate-180 transition-transform duration-500" />
-                    Regenerar
-                  </button>
-                  
-                  <button
-                    onClick={() => generateScript('improve')}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-400 hover:to-red-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-orange-500/20 hover:shadow-orange-500/40"
-                    title="Mejorar retención manteniendo la idea original"
-                  >
-                    <Zap className="w-5 h-5 fill-white" />
-                    Mejorar retención
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-      </main>
-
-      {/* Global styles specifically for the script rendering adjustments if needed */}
-      <style dangerouslySetInnerHTML={{__html: `
-        .script-content p {
-           line-height: 1.6;
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030712;
+            color: #f3f4f6;
         }
-      `}} />
-    </div>
+
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(75, 85, 99, 0.5); border-radius: 20px; }
+        .custom-scrollbar:hover::-webkit-scrollbar-thumb { background-color: rgba(107, 114, 128, 0.8); }
+
+        .toast-enter { transform: translateY(100%); opacity: 0; }
+        .toast-enter-active { transform: translateY(0); opacity: 1; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .toast-exit { transform: translateY(0); opacity: 1; }
+        .toast-exit-active { transform: translateY(100%); opacity: 0; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+
+        .sidebar-open { transform: translateX(0); }
+        .sidebar-closed { transform: translateX(-100%); }
+        @media (min-width: 768px) {
+            .sidebar-closed { transform: translateX(0); }
+        }
+    </style>
+</head>
+<body class="h-screen flex overflow-hidden selection:bg-indigo-500/30">
+
+    <!-- OVERLAY -->
+    <div id="mobile-overlay" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-30 hidden md:hidden" onclick="toggleSidebar()"></div>
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-40 w-72 bg-gray-950 border-r border-gray-800 transition-transform duration-300 ease-in-out flex flex-col sidebar-closed md:relative shadow-2xl">
+        <div class="p-5 border-b border-gray-800 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="bg-gradient-to-br from-indigo-500 to-violet-600 w-8 h-8 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                </div>
+                <h1 class="font-bold text-xl tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
+                    ScriptFlow<span class="text-indigo-500">AI</span>
+                </h1>
+            </div>
+            <button class="md:hidden text-gray-400 hover:text-white" onclick="toggleSidebar()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+        </div>
+
+        <div class="p-4">
+            <button onclick="resetForm()" class="w-full flex items-center justify-center gap-2 bg-gray-900 hover:bg-gray-800 text-gray-300 py-2.5 rounded-xl border border-gray-700 transition-colors font-medium text-sm">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                Nuevo Guion
+            </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-4 pt-0 custom-scrollbar">
+            <h2 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+                Mis Guiones
+            </h2>
+            <div id="history-list" class="space-y-3">
+                <!-- History items injected here via JS -->
+            </div>
+            <div id="empty-history" class="text-center text-gray-600 text-sm py-8 px-4 hidden">
+                <p>Aún no has generado guiones.</p>
+            </div>
+        </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col h-screen overflow-hidden bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-gray-900 via-black to-black relative">
+        
+        <!-- HEADER -->
+        <header class="h-16 border-b border-gray-800/50 flex items-center px-4 md:px-8 shrink-0 bg-black/20 backdrop-blur-md">
+            <button class="md:hidden p-2 text-gray-400 mr-4" onclick="toggleSidebar()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+            </button>
+            <div class="text-xs font-medium text-gray-400 flex items-center gap-2 bg-gray-900 px-3 py-1.5 rounded-full border border-gray-800">
+                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                <span class="hidden sm:inline">Sistema Anti-Repetición</span> Activo
+            </div>
+        </header>
+
+        <!-- CONTENT AREA -->
+        <div class="flex-1 overflow-y-auto p-4 md:p-8 flex flex-col custom-scrollbar">
+            <div class="max-w-4xl mx-auto w-full flex-1 flex flex-col">
                 
-  );
-}
+                <!-- HERO (Hide when script generated) -->
+                <div id="hero-section" class="mb-8 text-center pt-8 md:pt-16 transition-opacity duration-500">
+                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-violet-500/10 mb-4 border border-indigo-500/20">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-400"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>
+                    </div>
+                    <h2 class="text-3xl font-bold mb-3 tracking-tight text-white">Generador de Guiones Originales</h2>
+                    <p class="text-gray-400 max-w-xl mx-auto">
+                        Describe tu idea. Nuestro sistema garantiza que <strong class="text-indigo-400 font-semibold">nunca</strong> generemos dos guiones iguales para el mismo tema.
+                    </p>
+                </div>
+
+                <!-- FORM -->
+                <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl mb-6">
+                    <div class="mb-6">
+                        <label class="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-400"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/></svg>
+                            Tema o Idea del Video <span class="text-red-500">*</span>
+                        </label>
+                        <textarea id="input-topic" placeholder="Ej: Quiero hacer un video sobre los 3 peores errores al empezar en el gimnasio..." class="w-full bg-gray-950 border border-gray-700 text-gray-100 rounded-xl p-4 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all resize-none h-32"></textarea>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <!-- Platform -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="3" x2="21" y1="9" y2="9"/><line x1="9" x2="9" y1="21" y2="9"/></svg> Plataforma
+                            </label>
+                            <select id="input-platform" class="w-full bg-gray-950 border border-gray-700 text-gray-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option>TikTok</option>
+                                <option>Instagram Reels</option>
+                                <option>YouTube Shorts</option>
+                                <option>YouTube (Largo)</option>
+                            </select>
+                        </div>
+                        <!-- Duration -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Duración
+                            </label>
+                            <select id="input-duration" class="w-full bg-gray-950 border border-gray-700 text-gray-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option>15 segundos</option>
+                                <option>30 segundos</option>
+                                <option>45 segundos</option>
+                                <option>60 segundos</option>
+                                <option>90 segundos</option>
+                                <option>2 minutos</option>
+                                <option>3 minutos</option>
+                                <option>5 minutos</option>
+                                <option>10 minutos</option>
+                            </select>
+                        </div>
+                        <!-- Style -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg> Estilo
+                            </label>
+                            <select id="input-style" class="w-full bg-gray-950 border border-gray-700 text-gray-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option>Viral</option>
+                                <option>Storytelling</option>
+                                <option>Educativo</option>
+                                <option>Misterioso</option>
+                                <option>Emocional</option>
+                                <option>Divertido</option>
+                                <option>Profesional</option>
+                            </select>
+                        </div>
+                        <!-- Audience -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Público
+                            </label>
+                            <input type="text" id="input-audience" placeholder="Ej: Principiantes" class="w-full bg-gray-950 border border-gray-700 text-gray-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none">
+                        </div>
+                    </div>
+
+                    <button id="btn-generate" onclick="handleGenerate('new')" class="w-full py-4 rounded-xl font-bold text-white shadow-lg flex justify-center items-center gap-2 transition-all duration-300 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 hover:scale-[1.01] hover:shadow-indigo-500/25">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+                        <span id="btn-generate-text">GENERAR GUION ORIGINAL</span>
+                    </button>
+                </div>
+
+                <!-- LOADING STATE -->
+                <div id="loading-state" class="hidden flex-col items-center justify-center text-gray-400 space-y-4 pt-12 pb-12">
+                    <div class="relative w-16 h-16">
+                        <div class="absolute inset-0 rounded-full border-t-2 border-indigo-500 animate-spin"></div>
+                        <div class="absolute inset-2 rounded-full border-r-2 border-violet-500 animate-spin" style="animation-direction: reverse; animation-duration: 1.5s;"></div>
+                    </div>
+                    <p class="font-medium animate-pulse">Estructurando narrativa y diseñando ganchos...</p>
+                </div>
+
+                <!-- RESULT CONTAINER -->
+                <div id="result-container" class="hidden flex-1 min-h-[400px]">
+                    <div class="bg-gray-900 border border-gray-800 rounded-2xl shadow-xl overflow-hidden flex flex-col h-full transition-colors">
+                        <div class="bg-gray-950 p-4 border-b border-gray-800 flex flex-wrap items-center justify-between gap-4">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/></svg>
+                                </div>
+                                <div>
+                                    <h3 id="result-topic" class="font-semibold text-gray-100 line-clamp-1 max-w-[200px] sm:max-w-xs"></h3>
+                                    <p id="result-meta" class="text-xs text-gray-400 flex gap-2"></p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button onclick="copyCurrentScript()" class="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors flex items-center gap-2 text-sm">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg> 
+                                    <span class="hidden sm:inline">Copiar</span>
+                                </button>
+                                <button onclick="handleGenerate('improve')" id="btn-improve" class="p-2 text-orange-400 hover:bg-orange-900/30 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                                    <span class="hidden sm:inline">Mejorar Retención</span>
+                                </button>
+                                <button onclick="handleGenerate('new')" id="btn-another" class="p-2 text-indigo-400 hover:bg-indigo-900/30 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                    Generar Otro
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="p-6 md:p-8 flex-1 overflow-y-auto bg-[#0a0a0c]">
+                            <div id="result-content" class="max-w-3xl mx-auto font-sans">
+                                <!-- Script text injected here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- TOAST NOTIFICATION -->
+    <div id="toast" class="fixed bottom-6 right-6 z-50 toast-enter hidden">
+        <div id="toast-bg" class="flex items-center gap-3 px-5 py-3 rounded-xl shadow-xl border bg-green-950/90 border-green-900/50 text-green-200">
+            <svg id="toast-icon-success" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
+            <svg id="toast-icon-error" class="hidden" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+            <span id="toast-msg" class="font-medium text-sm">Mensaje</span>
+        </div>
+    </div>
+
+    <script>
+        // --- CONSTANTS & STATE ---
+        const API_KEY = ""; // El API Key se inyectará dinámicamente en el entorno de Canvas
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${API_KEY}`;
+        const STORAGE_KEY = 'scriptflow_history_v1';
+        
+        let history = [];
+        let currentScriptId = null;
+        let isGenerating = false;
+
+        // --- DOM ELEMENTS ---
+        const els = {
+            sidebar: document.getElementById('sidebar'),
+            overlay: document.getElementById('mobile-overlay'),
+            inputTopic: document.getElementById('input-topic'),
+            inputPlatform: document.getElementById('input-platform'),
+            inputDuration: document.getElementById('input-duration'),
+            inputStyle: document.getElementById('input-style'),
+            inputAudience: document.getElementById('input-audience'),
+            btnGenerate: document.getElementById('btn-generate'),
+            btnGenerateText: document.getElementById('btn-generate-text'),
+            heroSection: document.getElementById('hero-section'),
+            loadingState: document.getElementById('loading-state'),
+            resultContainer: document.getElementById('result-container'),
+            resultTopic: document.getElementById('result-topic'),
+            resultMeta: document.getElementById('result-meta'),
+            resultContent: document.getElementById('result-content'),
+            historyList: document.getElementById('history-list'),
+            emptyHistory: document.getElementById('empty-history'),
+            toast: document.getElementById('toast'),
+            toastBg: document.getElementById('toast-bg'),
+            toastMsg: document.getElementById('toast-msg'),
+            toastIconSuccess: document.getElementById('toast-icon-success'),
+            toastIconError: document.getElementById('toast-icon-error'),
+            btnImprove: document.getElementById('btn-improve'),
+            btnAnother: document.getElementById('btn-another')
+        };
+
+        // --- INITIALIZATION ---
+        function init() {
+            loadHistory();
+            renderHistory();
+        }
+
+        // --- UI UTILS ---
+        function toggleSidebar() {
+            els.sidebar.classList.toggle('sidebar-open');
+            els.sidebar.classList.toggle('sidebar-closed');
+            els.overlay.classList.toggle('hidden');
+        }
+
+        function showToast(message, type = 'success') {
+            els.toastMsg.textContent = message;
+            
+            if (type === 'error') {
+                els.toastBg.className = 'flex items-center gap-3 px-5 py-3 rounded-xl shadow-xl border bg-red-950/90 border-red-900/50 text-red-200';
+                els.toastIconError.classList.remove('hidden');
+                els.toastIconSuccess.classList.add('hidden');
+            } else {
+                els.toastBg.className = 'flex items-center gap-3 px-5 py-3 rounded-xl shadow-xl border bg-green-950/90 border-green-900/50 text-green-200';
+                els.toastIconError.classList.add('hidden');
+                els.toastIconSuccess.classList.remove('hidden');
+            }
+
+            els.toast.classList.remove('hidden', 'toast-exit', 'toast-exit-active');
+            els.toast.classList.add('toast-enter-active');
+            
+            setTimeout(() => {
+                els.toast.classList.remove('toast-enter-active');
+                els.toast.classList.add('toast-exit-active');
+                setTimeout(() => els.toast.classList.add('hidden'), 300);
+            }, 3000);
+        }
+
+        function setLoading(isLoading) {
+            isGenerating = isLoading;
+            if (isLoading) {
+                els.btnGenerate.classList.add('opacity-50', 'cursor-not-allowed');
+                els.btnGenerate.disabled = true;
+                els.btnGenerateText.innerHTML = '<svg class="animate-spin -ml-1 mr-2 h-5 w-5 text-white inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Generando...';
+                
+                els.heroSection.classList.add('hidden');
+                els.resultContainer.classList.add('hidden');
+                els.loadingState.classList.remove('hidden');
+                els.loadingState.classList.add('flex');
+                
+                els.btnImprove.disabled = true;
+                els.btnAnother.disabled = true;
+                els.btnImprove.classList.add('opacity-50');
+                els.btnAnother.classList.add('opacity-50');
+            } else {
+                els.btnGenerate.classList.remove('opacity-50', 'cursor-not-allowed');
+                els.btnGenerate.disabled = false;
+                els.btnGenerateText.textContent = 'GENERAR GUION ORIGINAL';
+                
+                els.loadingState.classList.add('hidden');
+                els.loadingState.classList.remove('flex');
+                
+                els.btnImprove.disabled = false;
+                els.btnAnother.disabled = false;
+                els.btnImprove.classList.remove('opacity-50');
+                els.btnAnother.classList.remove('opacity-50');
+            }
+        }
+
+        function resetForm() {
+            els.inputTopic.value = '';
+            els.inputAudience.value = '';
+            currentScriptId = null;
+            els.resultContainer.classList.add('hidden');
+            els.heroSection.classList.remove('hidden');
+            renderHistory(); // Refresh to remove active selection
+            if (window.innerWidth < 768) toggleSidebar();
+        }
+
+        // --- HISTORY MANAGEMENT ---
+        function loadHistory() {
+            try {
+                const saved = localStorage.getItem(STORAGE_KEY);
+                if (saved) history = JSON.parse(saved);
+            } catch (e) { console.error("Error loading history", e); }
+        }
+
+        function saveHistory() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+            renderHistory();
+        }
+
+        function deleteHistoryItem(id, event) {
+            if(event) event.stopPropagation();
+            history = history.filter(item => item.id !== id);
+            saveHistory();
+            if (currentScriptId === id) resetForm();
+            showToast('Guion eliminado');
+        }
+
+        function loadScriptFromHistory(id) {
+            const scriptData = history.find(item => item.id === id);
+            if (!scriptData) return;
+            
+            currentScriptId = id;
+            els.inputTopic.value = scriptData.topic;
+            els.inputPlatform.value = scriptData.platform;
+            els.inputDuration.value = scriptData.duration;
+            els.inputStyle.value = scriptData.style;
+            els.inputAudience.value = scriptData.audience || '';
+            
+            displayResult(scriptData);
+            if (window.innerWidth < 768) toggleSidebar();
+        }
+
+        function renderHistory() {
+            els.historyList.innerHTML = '';
+            
+            if (history.length === 0) {
+                els.emptyHistory.classList.remove('hidden');
+                return;
+            }
+            
+            els.emptyHistory.classList.add('hidden');
+            
+            history.forEach(item => {
+                const isActive = item.id === currentScriptId;
+                const div = document.createElement('div');
+                div.className = `group relative p-4 rounded-xl cursor-pointer transition-all border ${isActive ? 'bg-indigo-900/20 border-indigo-500/50 shadow-sm' : 'bg-gray-900 border-gray-800 hover:border-gray-700 hover:bg-gray-800/80'}`;
+                div.onclick = () => loadScriptFromHistory(item.id);
+                
+                div.innerHTML = `
+                    <p class="text-sm font-medium text-gray-200 line-clamp-2 leading-tight mb-2">${item.topic}</p>
+                    <div class="flex flex-wrap gap-1.5 mt-2">
+                        <span class="text-[10px] px-2 py-0.5 bg-gray-950 border border-gray-800 rounded-md text-gray-400">${item.platform}</span>
+                        <span class="text-[10px] px-2 py-0.5 bg-gray-950 border border-gray-800 rounded-md text-gray-400">${item.duration}</span>
+                    </div>
+                    <button onclick="deleteHistoryItem('${item.id}', event)" class="absolute top-3 right-3 text-gray-500 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                    </button>
+                `;
+                els.historyList.appendChild(div);
+            });
+        }
+
+        function displayResult(scriptData) {
+            els.heroSection.classList.add('hidden');
+            els.resultContainer.classList.remove('hidden');
+            
+            els.resultTopic.textContent = scriptData.topic;
+            els.resultMeta.innerHTML = `<span>${scriptData.platform}</span> • <span>${scriptData.duration}</span> • <span>${scriptData.style}</span>`;
+            
+            // Format Script Text
+            let html = '';
+            const lines = scriptData.script.split('\n');
+            lines.forEach(line => {
+                if (line.match(/^\d+:\d+\s*[—\-]\s*[A-ZÁÉÍÓÚÑ\s]+/)) {
+                    html += `<div class="mt-6 mb-2"><span class="inline-block bg-indigo-900/50 text-indigo-300 px-3 py-1 rounded-md text-xs font-bold tracking-wider border border-indigo-500/30">${line.trim()}</span></div>`;
+                } else if (line.trim() !== '') {
+                    html += `<p class="text-gray-300 leading-relaxed text-[1.05rem] mb-2">${line}</p>`;
+                }
+            });
+            
+            els.resultContent.innerHTML = html;
+            renderHistory(); // Update active state in sidebar
+        }
+
+        async function copyCurrentScript() {
+            if (!currentScriptId) return;
+            const scriptObj = history.find(s => s.id === currentScriptId);
+            if (!scriptObj) return;
+
+            try {
+                await navigator.clipboard.writeText(scriptObj.script);
+                showToast('Copiado al portapapeles');
+            } catch (err) {
+                // Fallback
+                const textArea = document.createElement("textarea");
+                textArea.value = scriptObj.script;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    showToast('Copiado al portapapeles');
+                } catch (ex) {
+                    showToast('No se pudo copiar', 'error');
+                }
+                document.body.removeChild(textArea);
+            }
+        }
+
+        async function handleGenerate(mode = 'new') {
+            const topic = els.inputTopic.value.trim();
+            if (!topic) {
+                showToast('Por favor, escribe un tema para el video.', 'error');
+                els.inputTopic.focus();
+                return;
+            }
+
+            const platform = els.inputPlatform.value;
+            const duration = els.inputDuration.value;
+            const style = els.inputStyle.value;
+            const audience = els.inputAudience.value;
+
+            setLoading(true);
+
+            // Fetch previous scripts for anti-repetition logic
+            const relatedScripts = history.filter(s => s.topic.toLowerCase().includes(topic.toLowerCase().substring(0, 5))).slice(0, 3);
+            
+            let systemPrompt = `Eres ScriptFlow AI, un guionista experto especializado en contenido viral y de alta retención para redes sociales. 
+TU ÚNICO OBJETIVO es escribir guiones para videos. NO generes imágenes, hashtags ni ideas extra, solo el guion exacto.
+REGLAS ESTRICTAS DE FORMATO:
+- Debes usar OBLIGATORIAMENTE el siguiente formato para indicar tiempos y secciones (todo en mayúscula después del guion):
+  [MM:SS] — [SECCIÓN]
+  [Texto que se va a decir]
+- Ejemplo: 
+  0:00 — GANCHO
+  ¿Sabías que estás perdiendo dinero todos los días y no te das cuenta?
+  0:05 — DESARROLLO
+  La mayoría de las personas...
+REGLAS DE RETENCIÓN:
+- NUNCA uses introducciones genéricas ("Hola", "Bienvenidos", "Hoy vamos a hablar").
+- Empieza con un gancho explosivo, curioso, un problema fuerte o una historia.
+- Usa "micro-ganchos" a mitad del guion para reconectar la atención.
+- Escribe de forma natural, ágil y conversacional.`;
+
+            let userPrompt = "";
+
+            if (mode === 'improve' && currentScriptId) {
+                const currentScriptObj = history.find(s => s.id === currentScriptId);
+                userPrompt = `Tengo el siguiente guion sobre: "${topic}".
+Guion actual:
+"""
+${currentScriptObj.script}
+"""
+OBJETIVO: Mejora drásticamente la RETENCIÓN de este guion. 
+- Haz el gancho más agresivo o curioso.
+- Mejora el ritmo de las frases (hazlas más dinámicas).
+- Añade micro-ganchos impactantes.
+- Mantén la información principal.
+- Respeta ESTRICTAMENTE el formato de tiempos y secciones.`;
+            } else {
+                userPrompt = `Crea un guion original.
+Tema: ${topic}
+Plataforma: ${platform}
+Duración objetivo: ${duration}
+Estilo: ${style}
+Público objetivo: ${audience || 'General'}`;
+
+                if (relatedScripts.length > 0) {
+                    const pastContext = relatedScripts.map((s, i) => `Guion anterior ${i+1}:\n${s.script.substring(0, 300)}...`).join('\n\n');
+                    userPrompt += `\n\n⚠️ REGLA CRÍTICA DE ANTI-REPETICIÓN:
+El usuario ya ha generado guiones sobre este tema anteriormente. Aquí tienes fragmentos de lo que ya se generó:
+---
+${pastContext}
+---
+TU NUEVO GUION DEBE SER COMPLETAMENTE DIFERENTE A LOS ANTERIORES. 
+- NO uses la misma estructura narrativa.
+- NO uses el mismo tipo de gancho (si antes usaste pregunta, usa una historia o dato chocante).
+- Cambia el ángulo, el enfoque y el orden de ideas. 
+- Sorpréndeme.`;
+                }
+            }
+
+            const payload = {
+                contents: [{ parts: [{ text: userPrompt }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] }
+            };
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                
+                const result = await response.json();
+                
+                if (result.error) {
+                    throw new Error(result.error.message || 'Error en la API');
+                }
+
+                const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (!generatedText) throw new Error('Respuesta vacía de la API');
+
+                const newScriptObj = {
+                    id: Date.now().toString(),
+                    topic, platform, duration, style, audience,
+                    script: generatedText,
+                    date: new Date().toISOString()
+                };
+
+                if (mode === 'improve' && currentScriptId) {
+                    // Update existing
+                    history = history.map(h => h.id === currentScriptId ? newScriptObj : h);
+                } else {
+                    // Add new
+                    history.unshift(newScriptObj);
+                }
+
+                currentScriptId = newScriptObj.id;
+                saveHistory();
+                displayResult(newScriptObj);
+                
+                showToast(mode === 'improve' ? 'Retención mejorada' : 'Guion generado con éxito');
+
+            } catch (error) {
+                console.error("API Error:", error);
+                showToast('Error al conectar con la IA. Verifica la consola.', 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        // Run init
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
